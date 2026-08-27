@@ -1,9 +1,19 @@
 import "server-only";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import type { RenderedPage } from "./pdf-to-images";
 import type { AnswerSegment, ExtractedQuestion, QuestionMapping } from "./types";
 
 const MODEL = "gemini-3.6-flash";
+
+// Gemini 3.x models "think" before answering by default, which consumes part
+// of the output token budget on reasoning the caller never sees. For
+// structured extraction we want the full budget going to the actual JSON
+// output, not reasoning, so we keep thinking minimal and give a generous
+// token ceiling as a safety margin.
+const EXTRACTION_CONFIG = {
+  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+  maxOutputTokens: 8192,
+};
 
 function client() {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -15,6 +25,26 @@ function client() {
   return new GoogleGenAI({ apiKey });
 }
 
+/**
+ * Gemini can come back with an empty/undefined `.text` for reasons that
+ * silently look like "no results" if not checked explicitly - e.g. the
+ * thinking budget consuming the whole output, a safety block, or the model
+ * hitting maxOutputTokens before finishing. We surface these as real errors
+ * instead of letting `JSON.parse(text ?? "{}")` quietly produce an empty
+ * result with no explanation.
+ */
+function requireResponseText(response: { text?: string; candidates?: unknown[] }, context: string): string {
+  if (response.text && response.text.trim().length > 0) {
+    return response.text;
+  }
+  const finishReason = (response.candidates?.[0] as { finishReason?: string } | undefined)?.finishReason;
+  throw new Error(
+    `Gemini returned an empty response during ${context}` +
+      (finishReason ? ` (finishReason: ${finishReason})` : "") +
+      ". This can happen if the model's thinking budget consumed the full output, if maxOutputTokens was hit, or if the content was blocked."
+  );
+}
+
 function pageToPart(p: RenderedPage) {
   return {
     inlineData: {
@@ -22,6 +52,42 @@ function pageToPart(p: RenderedPage) {
       data: p.pngBuffer.toString("base64"),
     },
   };
+}
+
+// Newer Gemini models "think" before answering by default, which spends part
+// of the output token budget on invisible reasoning tokens. For a pure
+// extraction/mapping task with a strict JSON schema we don't need that - and
+// if thinking eats the whole budget, the actual JSON answer can come back
+// empty. Disable it and give a generous, explicit output budget instead.
+const GENERATION_CONFIG = {
+  temperature: 0,
+  maxOutputTokens: 8192,
+  thinkingConfig: { thinkingBudget: 0 },
+};
+
+/**
+ * Parses a Gemini JSON response, throwing a descriptive error (instead of
+ * silently falling back to `{}`) if the model returned nothing usable - e.g.
+ * because it was cut off, refused, or hit a safety filter.
+ */
+function parseJsonResponse<T>(response: { text?: string; candidates?: unknown[] }, label: string): T {
+  const text = response.text;
+  if (!text || !text.trim()) {
+    const finishReason = (response.candidates as { finishReason?: string }[] | undefined)?.[0]
+      ?.finishReason;
+    throw new Error(
+      `Gemini returned an empty response while ${label}` +
+        (finishReason ? ` (finishReason: ${finishReason})` : "") +
+        ". This can happen with a blank/unreadable page, a safety filter, or a token-budget cutoff."
+    );
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      `Gemini's response while ${label} wasn't valid JSON. First 200 chars: ${text.slice(0, 200)}`
+    );
+  }
 }
 
 // ---------- Question extraction ----------
@@ -71,13 +137,13 @@ Rules:
     config: {
       responseMimeType: "application/json",
       responseSchema: questionSchema,
-      temperature: 0,
+      ...GENERATION_CONFIG,
     },
   });
 
-  const parsed = JSON.parse(response.text ?? "{}") as {
+  const parsed = parseJsonResponse<{
     questions: { number: string; subpart: string; text: string; page: number }[];
-  };
+  }>(response, "extracting questions");
 
   return (parsed.questions ?? []).map((q, idx) => ({
     id: `q_${idx}`,
@@ -142,13 +208,13 @@ If the page is blank or has no legible handwriting, return an empty segments arr
     config: {
       responseMimeType: "application/json",
       responseSchema: answerSchema,
-      temperature: 0,
+      ...GENERATION_CONFIG,
     },
   });
 
-  const parsed = JSON.parse(response.text ?? "{}") as {
+  const parsed = parseJsonResponse<{
     segments: { box_2d: number[]; detected_label: string; text: string }[];
-  };
+  }>(response, `extracting answers on page ${page.page}`);
 
   return (parsed.segments ?? [])
     .filter((s) => Array.isArray(s.box_2d) && s.box_2d.length === 4)
@@ -246,11 +312,11 @@ Every question id from the input must appear exactly once in mappings.`;
     config: {
       responseMimeType: "application/json",
       responseSchema: mappingSchema,
-      temperature: 0,
+      ...GENERATION_CONFIG,
     },
   });
 
-  const parsed = JSON.parse(response.text ?? "{}") as {
+  const parsed = parseJsonResponse<{
     mappings: {
       questionId: string;
       status: string;
@@ -262,7 +328,7 @@ Every question id from the input must appear exactly once in mappings.`;
     }[];
     unmatchedAnswerSegmentIds: string[];
     overallSummary: string;
-  };
+  }>(response, "mapping and grading answers");
 
   const mappings: QuestionMapping[] = (parsed.mappings ?? []).map((m) => ({
     questionId: m.questionId,
