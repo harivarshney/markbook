@@ -5,12 +5,29 @@ import { createCanvas } from "@napi-rs/canvas";
 // explicit canvas factory. We patch the canvas creation with @napi-rs/canvas,
 // which ships prebuilt native binaries (no system cairo/pango needed), so it
 // works both locally and on serverless platforms like Vercel.
+//
+// pdf.js normally loads a separate worker script (pdf.worker.mjs) at runtime
+// via a dynamic, path-computed `import()`. That path computation doesn't
+// survive bundling consistently across tools (Vercel's file tracer can't see
+// it to include the file; Turbopack rewrites it into its own internal module
+// scheme and breaks it a different way). pdf.js has an official escape hatch
+// for exactly this: if `globalThis.pdfjsWorker` is already populated, it
+// skips the dynamic import entirely and uses that directly. So we import the
+// worker module ourselves - a plain static import, which every bundler
+// traces and includes correctly - and hand it to pdf.js up front.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pdfjsLib: any = null;
 
 async function getPdfjs() {
   if (!pdfjsLib) {
-    pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const [lib, worker] = await Promise.all([
+      import("pdfjs-dist/legacy/build/pdf.mjs"),
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-expect-error - pdfjs-dist doesn't ship types for the worker entry point
+      import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
+    ]);
+    (globalThis as typeof globalThis & { pdfjsWorker?: unknown }).pdfjsWorker = worker;
+    pdfjsLib = lib;
   }
   return pdfjsLib;
 }
