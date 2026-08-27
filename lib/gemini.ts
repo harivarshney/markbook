@@ -1,19 +1,11 @@
 import "server-only";
-import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import type { RenderedPage } from "./pdf-to-images";
 import type { AnswerSegment, ExtractedQuestion, QuestionMapping } from "./types";
 
+
 const MODEL = "gemini-3.6-flash";
 
-// Gemini 3.x models "think" before answering by default, which consumes part
-// of the output token budget on reasoning the caller never sees. For
-// structured extraction we want the full budget going to the actual JSON
-// output, not reasoning, so we keep thinking minimal and give a generous
-// token ceiling as a safety margin.
-const EXTRACTION_CONFIG = {
-  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-  maxOutputTokens: 8192,
-};
 
 function client() {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -25,25 +17,6 @@ function client() {
   return new GoogleGenAI({ apiKey });
 }
 
-/**
- * Gemini can come back with an empty/undefined `.text` for reasons that
- * silently look like "no results" if not checked explicitly - e.g. the
- * thinking budget consuming the whole output, a safety block, or the model
- * hitting maxOutputTokens before finishing. We surface these as real errors
- * instead of letting `JSON.parse(text ?? "{}")` quietly produce an empty
- * result with no explanation.
- */
-function requireResponseText(response: { text?: string; candidates?: unknown[] }, context: string): string {
-  if (response.text && response.text.trim().length > 0) {
-    return response.text;
-  }
-  const finishReason = (response.candidates?.[0] as { finishReason?: string } | undefined)?.finishReason;
-  throw new Error(
-    `Gemini returned an empty response during ${context}` +
-      (finishReason ? ` (finishReason: ${finishReason})` : "") +
-      ". This can happen if the model's thinking budget consumed the full output, if maxOutputTokens was hit, or if the content was blocked."
-  );
-}
 
 function pageToPart(p: RenderedPage) {
   return {
@@ -54,43 +27,9 @@ function pageToPart(p: RenderedPage) {
   };
 }
 
-// Newer Gemini models "think" before answering by default, which spends part
-// of the output token budget on invisible reasoning tokens. For a pure
-// extraction/mapping task with a strict JSON schema we don't need that - and
-// if thinking eats the whole budget, the actual JSON answer can come back
-// empty. Disable it and give a generous, explicit output budget instead.
-const GENERATION_CONFIG = {
-  temperature: 0,
-  maxOutputTokens: 8192,
-  thinkingConfig: { thinkingBudget: 0 },
-};
-
-/**
- * Parses a Gemini JSON response, throwing a descriptive error (instead of
- * silently falling back to `{}`) if the model returned nothing usable - e.g.
- * because it was cut off, refused, or hit a safety filter.
- */
-function parseJsonResponse<T>(response: { text?: string; candidates?: unknown[] }, label: string): T {
-  const text = response.text;
-  if (!text || !text.trim()) {
-    const finishReason = (response.candidates as { finishReason?: string }[] | undefined)?.[0]
-      ?.finishReason;
-    throw new Error(
-      `Gemini returned an empty response while ${label}` +
-        (finishReason ? ` (finishReason: ${finishReason})` : "") +
-        ". This can happen with a blank/unreadable page, a safety filter, or a token-budget cutoff."
-    );
-  }
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    throw new Error(
-      `Gemini's response while ${label} wasn't valid JSON. First 200 chars: ${text.slice(0, 200)}`
-    );
-  }
-}
 
 // ---------- Question extraction ----------
+
 
 const questionSchema = {
   type: Type.OBJECT,
@@ -112,6 +51,7 @@ const questionSchema = {
   required: ["questions"],
 };
 
+
 export async function extractQuestions(pages: RenderedPage[]): Promise<ExtractedQuestion[]> {
   const ai = client();
   const parts = pages.flatMap((p, i) => [
@@ -119,9 +59,12 @@ export async function extractQuestions(pages: RenderedPage[]): Promise<Extracted
     pageToPart(p),
   ]);
 
+
   const prompt = `You are analyzing a scanned/printed exam question paper (${pages.length} page(s), images attached in printed order).
 
+
 Extract every question in the exact order they are printed, top to bottom, page by page.
+
 
 Rules:
 - Treat labelled sub-parts as SEPARATE entries. Example: "11 (a)" and "11 (b)" are two entries, each with number="11" and subpart="a" / "b" respectively.
@@ -131,19 +74,22 @@ Rules:
 - Do not include section headers, instructions, or the paper title as questions.
 - record which page each question starts on.`;
 
+
   const response = await ai.models.generateContent({
     model: MODEL,
     contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
     config: {
       responseMimeType: "application/json",
       responseSchema: questionSchema,
-      ...GENERATION_CONFIG,
+      temperature: 0,
     },
   });
 
-  const parsed = parseJsonResponse<{
+
+  const parsed = JSON.parse(response.text ?? "{}") as {
     questions: { number: string; subpart: string; text: string; page: number }[];
-  }>(response, "extracting questions");
+  };
+
 
   return (parsed.questions ?? []).map((q, idx) => ({
     id: `q_${idx}`,
@@ -156,7 +102,9 @@ Rules:
   }));
 }
 
+
 // ---------- Answer extraction (per page, so bboxes stay relative to a single image) ----------
+
 
 const answerSchema = {
   type: Type.OBJECT,
@@ -187,20 +135,25 @@ const answerSchema = {
   required: ["segments"],
 };
 
+
 export async function extractAnswerSegmentsForPage(
   page: RenderedPage
 ): Promise<Omit<AnswerSegment, "id" | "page">[]> {
   const ai = client();
   const prompt = `This image is one page of a student's handwritten exam answer sheet.
 
+
 Identify every distinct answer region on this page: each contiguous block of handwriting that answers one question (or one sub-part of a question). A single page may contain answers to multiple questions, or a continuation of an answer that started on a previous page.
+
 
 For each region:
 - Give a tight bounding box in box_2d as [ymin, xmin, ymax, xmax], normalized to a 0-1000 scale relative to this image's width/height.
 - detected_label: transcribe the question number the student wrote (e.g. "Q11(a)", "Ans 3", "5 b") if legible near the region. Leave empty if the student did not label it or it's illegible.
 - text: transcribe the handwritten answer content as accurately as possible.
 
+
 If the page is blank or has no legible handwriting, return an empty segments array. If there is rough/scratch work that isn't a real answer attempt, you may still include it but you don't have to.`;
+
 
   const response = await ai.models.generateContent({
     model: MODEL,
@@ -208,13 +161,15 @@ If the page is blank or has no legible handwriting, return an empty segments arr
     config: {
       responseMimeType: "application/json",
       responseSchema: answerSchema,
-      ...GENERATION_CONFIG,
+      temperature: 0,
     },
   });
 
-  const parsed = parseJsonResponse<{
+
+  const parsed = JSON.parse(response.text ?? "{}") as {
     segments: { box_2d: number[]; detected_label: string; text: string }[];
-  }>(response, `extracting answers on page ${page.page}`);
+  };
+
 
   return (parsed.segments ?? [])
     .filter((s) => Array.isArray(s.box_2d) && s.box_2d.length === 4)
@@ -224,6 +179,7 @@ If the page is blank or has no legible handwriting, return an empty segments arr
       text: s.text,
     }));
 }
+
 
 export async function extractAllAnswerSegments(pages: RenderedPage[]): Promise<AnswerSegment[]> {
   const results = await Promise.all(pages.map((p) => extractAnswerSegmentsForPage(p)));
@@ -240,7 +196,9 @@ export async function extractAllAnswerSegments(pages: RenderedPage[]): Promise<A
   return segments;
 }
 
+
 // ---------- Mapping + grading ----------
+
 
 const mappingSchema = {
   type: Type.OBJECT,
@@ -271,11 +229,13 @@ const mappingSchema = {
   required: ["mappings", "unmatchedAnswerSegmentIds", "overallSummary"],
 };
 
+
 export async function mapAndGrade(
   questions: ExtractedQuestion[],
   segments: AnswerSegment[]
 ): Promise<{ mappings: QuestionMapping[]; unmatchedAnswerSegmentIds: string[]; overallSummary: string }> {
   const ai = client();
+
 
   const questionsPayload = questions.map((q) => ({
     id: q.id,
@@ -289,13 +249,17 @@ export async function mapAndGrade(
     text: s.text,
   }));
 
+
   const prompt = `You are mapping a student's handwritten answers to the correct questions from an exam paper, then grading each answer.
+
 
 QUESTIONS (in printed order):
 ${JSON.stringify(questionsPayload, null, 2)}
 
+
 ANSWER SEGMENTS (extracted from the answer sheet, may be out of order, may span multiple pages, may include content that doesn't belong to any question):
 ${JSON.stringify(segmentsPayload, null, 2)}
+
 
 Task:
 1. For each question, determine which answer segment(s) belong to it (an answer may span multiple segments/pages - group them). Match primarily using detectedLabel when present and consistent with the question numbering, otherwise use semantic content matching between the question text and the segment text.
@@ -304,7 +268,9 @@ Task:
 4. Grade each answered question: award a score out of a reasonable maxScore (infer from marks stated in the question text if present, otherwise use 5), give a verdict, and 1-2 sentences of constructive feedback. For unanswered questions, score=0, verdict="ungraded", feedback should note it was not attempted.
 5. Write a short overall summary for the teacher (attempted vs unanswered, general performance).
 
+
 Every question id from the input must appear exactly once in mappings.`;
+
 
   const response = await ai.models.generateContent({
     model: MODEL,
@@ -312,11 +278,12 @@ Every question id from the input must appear exactly once in mappings.`;
     config: {
       responseMimeType: "application/json",
       responseSchema: mappingSchema,
-      ...GENERATION_CONFIG,
+      temperature: 0,
     },
   });
 
-  const parsed = parseJsonResponse<{
+
+  const parsed = JSON.parse(response.text ?? "{}") as {
     mappings: {
       questionId: string;
       status: string;
@@ -328,7 +295,8 @@ Every question id from the input must appear exactly once in mappings.`;
     }[];
     unmatchedAnswerSegmentIds: string[];
     overallSummary: string;
-  }>(response, "mapping and grading answers");
+  };
+
 
   const mappings: QuestionMapping[] = (parsed.mappings ?? []).map((m) => ({
     questionId: m.questionId,
@@ -341,6 +309,7 @@ Every question id from the input must appear exactly once in mappings.`;
       : "ungraded") as QuestionMapping["verdict"],
     feedback: m.feedback,
   }));
+
 
   return {
     mappings,
