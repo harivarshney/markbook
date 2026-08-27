@@ -772,8 +772,6 @@ MIT License — see [`LICENSE`](LICENSE).
 
 AI/ML Developer & B.Tech AI & ML Student
 
-* GitHub: https://github.com/harivarshney
-* Markbook: https://github.com/harivarshney/markbook
 * Live Demo: https://markbook-rho.vercel.app
 
 ---
