@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #faf7f0;
+  --paper-raised: #ffffff;
+  --ink: #201c16;
+  --ink-soft: #635c4f;
+  --rule: #e5ddcc;
+  --rule-strong: #d3c8ad;
+  --highlighter: #f6b93d;
+  --highlighter-soft: #fce3ab;
+  --pen-red: #b6412c;
+  --pen-red-soft: #f3ddd6;
+  --pen-green: #2f6a4f;
+  --pen-green-soft: #dbe9df;
+  /* --font-display / --font-body / --font-mono are injected on <html> by next/font in layout.tsx */
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-paper-raised: var(--paper-raised);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-highlighter: var(--highlighter);
+  --color-highlighter-soft: var(--highlighter-soft);
+  --color-pen-red: var(--pen-red);
+  --color-pen-red-soft: var(--pen-red-soft);
+  --color-pen-green: var(--pen-green);
+  --color-pen-green-soft: var(--pen-green-soft);
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  background-image:
+    linear-gradient(var(--rule) 1px, transparent 1px);
+  background-size: 100% 42px;
+  background-attachment: local;
+}
+
+::selection {
+  background: var(--highlighter-soft);
+}
+
+.no-ruled-bg {
+  background-image: none;
+}
+
+@keyframes swipe-in {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+.highlight-swipe {
+  animation: swipe-in 0.35s ease-out;
+}
+
+@keyframes sparkle-float {
+  0%, 100% { transform: translateY(0) rotate(0deg); opacity: 0.6; }
+  50% { transform: translateY(-6px) rotate(12deg); opacity: 1; }
+}
+
+.sparkle {
+  animation: sparkle-float 2.2s ease-in-out infinite;
+}
