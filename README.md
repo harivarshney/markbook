@@ -1,3 +1,5 @@
+![Markbook ](https://socialify.git.ci/harivarshney/markbook/image?font=Jost&language=1&name=1&owner=1&pattern=Circuit+Board&stargazers=1&theme=Dark)
+
 # 📚 Markbook — AI Assessment Extraction & Grading
 
 ### Turn a question paper and handwritten answer sheet into a structured, reviewable assessment — with AI-powered question extraction, answer mapping, precise highlighting, and grading.
