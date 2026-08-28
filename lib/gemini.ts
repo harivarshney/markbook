@@ -1,5 +1,5 @@
 import "server-only";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import type { RenderedPage } from "./pdf-to-images";
 import type { AnswerSegment, ExtractedQuestion, QuestionMapping } from "./types";
 
@@ -24,23 +24,12 @@ function pageToPart(p: RenderedPage) {
   };
 }
 
-// Newer Gemini models "think" before answering by default, which spends part
-// of the output token budget on invisible reasoning tokens. For a pure
-// extraction/mapping task with a strict JSON schema we don't need that - and
-// if thinking eats the whole budget, the actual JSON answer can come back
-// empty. Disable it and give a generous, explicit output budget instead.
 const GENERATION_CONFIG = {
   temperature: 0,
   maxOutputTokens: 8192,
-  thinkingConfig: { thinkingBudget: 0 },
+  thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
 };
 
-/**
- * Free-tier Gemini keys have low requests-per-minute limits. A single
- * assessment can legitimately need several calls (questions, answers,
- * mapping) - if one gets rate-limited, retry with backoff instead of failing
- * the whole pipeline outright.
- */
 async function generateWithRetry(
   ai: GoogleGenAI,
   params: Parameters<GoogleGenAI["models"]["generateContent"]>[0],
