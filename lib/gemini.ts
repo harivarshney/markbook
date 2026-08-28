@@ -24,12 +24,26 @@ function pageToPart(p: RenderedPage) {
   };
 }
 
+// Newer Gemini models "think" before answering by default, which spends part
+// of the output token budget on invisible reasoning tokens. For a pure
+// extraction/mapping task with a strict JSON schema we don't need that - and
+// if thinking eats the whole budget, the actual JSON answer can come back
+// empty. Gemini 3.5+ models replaced the old `thinkingBudget` field with
+// `thinkingLevel` - passing `thinkingBudget` to a 3.5+ model is now a hard
+// 400 INVALID_ARGUMENT error, not just ignored, so this must use the new
+// field name.
 const GENERATION_CONFIG = {
   temperature: 0,
   maxOutputTokens: 8192,
   thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
 };
 
+/**
+ * Free-tier Gemini keys have low requests-per-minute limits. A single
+ * assessment can legitimately need several calls (questions, answers,
+ * mapping) - if one gets rate-limited, retry with backoff instead of failing
+ * the whole pipeline outright.
+ */
 async function generateWithRetry(
   ai: GoogleGenAI,
   params: Parameters<GoogleGenAI["models"]["generateContent"]>[0],
@@ -58,13 +72,21 @@ async function generateWithRetry(
 /**
  * Parses a Gemini JSON response, throwing a descriptive error (instead of
  * silently falling back to `{}`) if the model returned nothing usable - e.g.
- * because it was cut off, refused, or hit a safety filter.
+ * because it was cut off, refused, or hit a safety filter. Always logs the
+ * raw response server-side (visible in Vercel's Function Logs) so failures
+ * can be diagnosed from real output instead of guesswork.
  */
 function parseJsonResponse<T>(response: { text?: string; candidates?: unknown[] }, label: string): T {
   const text = response.text;
+  const finishReason = (response.candidates as { finishReason?: string }[] | undefined)?.[0]
+    ?.finishReason;
+  console.log(
+    `[gemini:${label}] finishReason=${finishReason ?? "n/a"} textLength=${text?.length ?? 0}`
+  );
+  if (text) {
+    console.log(`[gemini:${label}] raw response (first 1000 chars): ${text.slice(0, 1000)}`);
+  }
   if (!text || !text.trim()) {
-    const finishReason = (response.candidates as { finishReason?: string }[] | undefined)?.[0]
-      ?.finishReason;
     throw new Error(
       `Gemini returned an empty response while ${label}` +
         (finishReason ? ` (finishReason: ${finishReason})` : "") +
@@ -135,7 +157,19 @@ Rules:
     questions: { number: string; subpart: string; text: string; page: number }[];
   }>(response, "extracting questions");
 
-  return (parsed.questions ?? []).map((q, idx) => ({
+  if (!parsed.questions || parsed.questions.length === 0) {
+    // Genuinely empty extraction from a real exam paper is almost always a
+    // sign something's off (misread image, over-cautious model, schema
+    // issue) rather than a paper with zero questions - surface the raw
+    // response so it's actionable instead of a generic "try again".
+    throw new Error(
+      `Gemini parsed successfully but returned zero questions. Raw response: ${JSON.stringify(
+        parsed
+      ).slice(0, 500)}`
+    );
+  }
+
+  return parsed.questions.map((q, idx) => ({
     id: `q_${idx}`,
     number: q.number,
     subpart: q.subpart || undefined,
