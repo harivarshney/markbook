@@ -1,7 +1,8 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FileText, Image as ImageIcon, Check, X } from "lucide-react";
+import { estimatePdfPageCount } from "@/lib/pdf-page-count";
 
 const ACCEPTED = ".pdf,.png,.jpg,.jpeg,.webp";
 
@@ -19,7 +20,28 @@ export function UploadSlot({
   tabColor: "red" | "amber";
 }) {
   const [dragOver, setDragOver] = useState(false);
+  const [pageCount, setPageCount] = useState<number | null>(null);
+  const [lastFile, setLastFile] = useState<File | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Reset the displayed page count as soon as the file identity changes,
+  // during render rather than in an effect (avoids an extra render pass).
+  if (file !== lastFile) {
+    setLastFile(file);
+    setPageCount(null);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    if (file && file.type === "application/pdf") {
+      file.arrayBuffer().then((buf) => {
+        if (!cancelled) setPageCount(estimatePdfPageCount(buf));
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [file]);
 
   const tabClass = tabColor === "red" ? "bg-pen-red" : "bg-highlighter";
 
@@ -81,7 +103,10 @@ export function UploadSlot({
             <p className="truncate font-body text-sm text-ink" title={file.name}>
               {file.name}
             </p>
-            <p className="font-mono text-[11px] text-ink-soft">{(file.size / 1024).toFixed(0)} KB</p>
+            <p className="font-mono text-[11px] text-ink-soft">
+              {(file.size / 1024).toFixed(0)} KB
+              {pageCount !== null ? ` · ${pageCount} page${pageCount === 1 ? "" : "s"}` : ""}
+            </p>
           </div>
           <button
             type="button"
