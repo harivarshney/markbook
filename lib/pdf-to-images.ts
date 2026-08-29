@@ -1,5 +1,6 @@
 import "server-only";
 import { createCanvas } from "@napi-rs/canvas";
+import path from "node:path";
 
 // pdfjs-dist v6 legacy build - works in plain Node (no DOM) when given an
 // explicit canvas factory. We patch the canvas creation with @napi-rs/canvas,
@@ -22,7 +23,6 @@ async function getPdfjs() {
   if (!pdfjsLib) {
     const [lib, worker] = await Promise.all([
       import("pdfjs-dist/legacy/build/pdf.mjs"),
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-expect-error - pdfjs-dist doesn't ship types for the worker entry point
       import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
     ]);
@@ -43,6 +43,20 @@ export type RenderedPage = {
 const RENDER_SCALE = 2.0; // ~144 DPI equivalent for a 72dpi PDF unit page - good balance of clarity vs payload size
 const MAX_PAGES = 30;
 
+// pdf.js needs real glyph-outline data to draw text for PDFs that use one of
+// the 14 built-in "standard" PDF fonts (Helvetica, Times, etc.) without
+// embedding it - extremely common, since embedding is optional for these.
+// Without this, pdf.js falls back to a best-effort system-font substitute
+// for rendering, which silently produces a BLANK page on minimal serverless
+// runtimes with no fonts installed (no error - it just draws nothing).
+// A plain `process.cwd()`-relative path is used deliberately here, not
+// `require.resolve`/`import.meta.resolve` - both of those broke differently
+// under this project's bundler when resolving pdf.js's worker file, so this
+// avoids depending on module resolution at all. `outputFileTracingIncludes`
+// in next.config.ts guarantees these files physically exist at this path
+// (relative to the deployed function's root) once deployed.
+const STANDARD_FONT_DATA_URL = `${path.join(process.cwd(), "node_modules/pdfjs-dist/standard_fonts")}/`;
+
 /**
  * Converts a PDF (as bytes) into an array of rendered page PNGs, in printed order.
  */
@@ -52,6 +66,7 @@ export async function renderPdfToImages(bytes: Uint8Array): Promise<RenderedPage
     data: bytes,
     disableFontFace: true,
     isEvalSupported: false,
+    standardFontDataUrl: STANDARD_FONT_DATA_URL,
   });
   const pdf = await loadingTask.promise;
   const numPages = Math.min(pdf.numPages, MAX_PAGES);
