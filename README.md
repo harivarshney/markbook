@@ -35,6 +35,15 @@ The goal is simple:
 
 ---
 
+---
+
+## 🌐 Live Demo
+
+**Markbook:**
+https://markbook-rho.vercel.app
+
+---
+
 ## ✨ What Markbook Actually Does
 
 | Capability                      | What happens                                                                                     |
@@ -82,7 +91,7 @@ The application uses multiple AI stages, each responsible for a different part o
    │ Question Extraction │             │  Answer Extraction │
    │                     │             │                    │
    │ Gemini              │             │ Gemini             │
-   │ Full paper context  │             │ Page-by-page       │
+   │ Full paper context  │             │ All pages, 1 call  │
    └──────────┬─────────┘             └──────────┬─────────┘
               │                                  │
               │                                  │
@@ -152,21 +161,22 @@ is represented as two independent assessment items while preserving the original
 
 ### 2. Answer Sheet Extraction
 
-The handwritten answer sheet is processed **page by page**.
+All pages of the answer sheet are sent to Gemini together, in a single call, with each page explicitly labelled.
+
+This is a deliberate tradeoff. Free-tier API keys have a very small daily request cap (Gemini 3.6 Flash: **20 requests/day** at the time of writing) — the original per-page-call design multiplied API usage directly with page count, which reliably exhausted that quota. Batching everything into one call keeps total usage at a fixed 3 requests per assessment, regardless of how many pages the answer sheet has.
 
 For every detected handwritten answer region, Gemini returns structured information including:
 
 ```text
 {
+  page,
   questionLabel,
   transcription,
   boundingBox
 }
 ```
 
-The page-level processing is important because every bounding box remains unambiguous relative to a single source image.
-
-The system can therefore determine not only:
+Because each region is tagged with its own page number, and its bounding box is normalized relative to that specific page's own image dimensions, coordinates stay just as unambiguous as the old per-call design — the system can still determine not only:
 
 > "The student answered question 4."
 
@@ -255,6 +265,18 @@ This makes the mapping **visually verifiable** instead of relying only on AI-gen
 
 ---
 
+## 🎨 Design: Matching the VedaAI Figma
+
+Beyond functionality, Markbook's UI shell was built to closely follow the Figma reference provided with the assignment:
+
+* **Persistent sidebar** — VedaAI branding, "AI Teacher's Toolkit" pill, and the same navigation structure (Home / My Classroom / Assignments / Exams / My Library)
+* **Top bar** — breadcrumb navigation plus help, notification, and profile affordances matching the reference layout
+* **Colored score badges** on each question, with an inline expandable "AI Feedback" panel per question — no need to select a question to see its evaluation
+* **Question tag on the highlight itself** (e.g. "Q3 (a)") rather than only in a side panel, so the mapping is visually self-explanatory
+* **Page-by-page navigation** on the answer viewer for multi-page answers, instead of an undifferentiated scroll
+
+---
+
 ## 📊 AI-Assisted Grading
 
 After the question-answer mapping is complete, Markbook can evaluate answered questions.
@@ -335,7 +357,7 @@ This provides feedback to the teacher while the AI pipeline is running instead o
                     │       Next.js Server         │
                     │                             │
                     │  File Processing             │
-                    │  PDF Rendering               │
+                    │  PDF Rendering                │
                     │  AI Pipeline                 │
                     │  Result Transformation       │
                     └──────────────┬──────────────┘
@@ -344,7 +366,7 @@ This provides feedback to the teacher while the AI pipeline is running instead o
                     │                             │
                     ▼                             ▼
           ┌──────────────────┐          ┌──────────────────┐
-          │   PDF Renderer   │          │   Gemini 2.5     │
+          │   PDF Renderer   │          │   Gemini 3.6     │
           │                  │          │      Flash       │
           │ pdfjs-dist       │          │                  │
           │ @napi-rs/canvas  │          │ Extraction       │
@@ -365,7 +387,7 @@ This provides feedback to the teacher while the AI pipeline is running instead o
 
 ### AI
 
-* **Google Gemini 2.5 Flash**
+* **Google Gemini 3.6 Flash**
 * `@google/genai`
 
 Gemini is used for:
@@ -437,14 +459,7 @@ The application will be available at:
 http://localhost:3000
 ```
 
----
 
-## 🌐 Live Demo
-
-**Markbook:**
-https://markbook-rho.vercel.app
-
----
 
 ## 📁 Project Structure
 
@@ -548,11 +563,9 @@ Processing the complete paper together allows the model to understand the docume
 
 ---
 
-### Why process answer sheets page-by-page?
+### Why extract all answer-sheet pages in a single call?
 
-Bounding boxes are inherently page-relative.
-
-Processing each answer-sheet page independently means every returned coordinate belongs to exactly one image, making subsequent highlighting predictable and reliable.
+The original design made one API call per page — reliable for bounding-box precision, but it multiplies API usage directly with page count. An 8-page answer sheet meant 8 near-simultaneous requests, which is enough on its own to blow through a free-tier daily cap. Batching all pages into one call, with each page explicitly labelled and each returned segment tagged with its page number, keeps bounding boxes just as unambiguous while cutting a page-count-dependent cost into a fixed 3 calls per assessment. A `generateWithRetry` helper with exponential backoff (2s → 4s → 8s) also handles transient rate-limit (429) responses automatically.
 
 ---
 
@@ -651,6 +664,10 @@ For serverless reliability, PDFs are currently limited to:
 
 * **30 pages per file**
 * **20 MB per file**
+
+### API rate limits
+
+Gemini's free tier currently allows **20 requests/day** and a low per-minute cap on this model. Markbook uses 3 API calls per assessment (question extraction, answer extraction, mapping/grading) and retries automatically on transient rate-limit errors, but a free-tier key can still be exhausted by heavy same-day testing. For production or high-volume evaluation use, linking a billing account (even without spending) raises these limits substantially.
 
 ### No persistent assessment database
 
